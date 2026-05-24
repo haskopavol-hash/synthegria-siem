@@ -1,0 +1,34 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# render.yaml — Render.com deployment (Free tier)
+#
+# POSTUP:
+#   1. Pushni tento repozitár na GitHub.
+#   2. Na Render.com: New → Blueprint → vyber repo.
+#      Render automaticky načíta tento súbor.
+#   3. V Render dashboarde nastav secret:
+#        STRIPE_SECRET_KEY = sk_test_...
+#
+# Dokumentácia: https://render.com/docs/blueprint-spec
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  - type: web
+    name: synthegria-siem-api
+    runtime: docker
+    plan: free                 # bezplatný plán (512 MB RAM, 0.1 CPU)
+                               # POZOR: služba sa uspí po 15 min. nečinnosti
+
+    region: oregon             # najbližší voľný región pre EU: frankfurt
+    dockerfilePath: ./Dockerfile
+
+    envVars:
+      - key: LOG_LEVEL
+        value: info
+      - key: WEB_CONCURRENCY
+        value: "1"             # 1 worker na free tier (0.1 vCPU)
+      - key: STRIPE_SECRET_KEY
+        sync: false            # zadáš manuálne v Render dashboarde — NIKDY necommituj
+
+    healthCheckPath: /healthz
+
+    autoDeploy: true           # pri každom push na main sa automaticky redeploy-ne

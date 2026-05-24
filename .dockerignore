@@ -1,0 +1,47 @@
+# Version control
+.git/
+.gitignore
+
+# Node / pnpm (workspace tooling, not needed inside container)
+node_modules/
+pnpm-lock.yaml
+pnpm-workspace.yaml
+package.json
+tsconfig*.json
+artifacts/
+lib/
+
+# Python byte-code and caches
+__pycache__/
+*.py[cod]
+*.pyo
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# uv & virtual environments
+.venv/
+.uv/
+
+# Test and developer scripts
+scripts/test_api.py
+scripts/test_stripe_meter_events.py
+
+# IDE and OS artefacts
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db
+.env
+.env.*
+*.local
+
+# Documentation that doesn't belong in the image
+README.md
+replit.md
+CHANGELOG.md
+
+# Replit-specific
+.replit
+replit.nix
+.local/

@@ -1,0 +1,57 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# fly.toml — Fly.io deployment config for the Synthegria SIEM API
+#
+# Deploy with:
+#   fly launch --copy-config          # first deploy (creates app + provisions)
+#   fly secrets set STRIPE_SECRET_KEY=sk_live_...
+#   fly deploy
+#
+# Docs: https://fly.io/docs/reference/configuration/
+# ─────────────────────────────────────────────────────────────────────────────
+
+app    = "synthegria-siem"   # change this to a globally-unique name
+primary_region = "iad"       # iad=US-East  ord=US-Central  lhr=Europe
+
+# ── Build ─────────────────────────────────────────────────────────────────────
+[build]
+  # Fly.io detects the Dockerfile automatically; no extra build args needed.
+
+# ── HTTP service ─────────────────────────────────────────────────────────────
+[http_service]
+  internal_port       = 8000
+  force_https         = true
+  auto_stop_machines  = "stop"    # free-tier friendly: stop idle machines
+  auto_start_machines = true
+  min_machines_running = 0        # set to 1 for always-on production SLA
+
+  # Health check — Fly.io will wait for /healthz → 200 before routing traffic.
+  [[http_service.checks]]
+    grace_period  = "15s"
+    interval      = "30s"
+    method        = "GET"
+    path          = "/healthz"
+    protocol      = "http"
+    timeout       = "5s"
+
+# ── Compute ───────────────────────────────────────────────────────────────────
+[[vm]]
+  size   = "shared-cpu-1x"   # 256 MB RAM — sufficient for this API
+  memory = "256mb"
+  # Upgrade to "performance-1x" (dedicated vCPU) for production workloads.
+
+# ── Environment variables ─────────────────────────────────────────────────────
+# Non-secret config can live here.  STRIPE_SECRET_KEY must be set as a secret:
+#   fly secrets set STRIPE_SECRET_KEY=sk_live_...
+[env]
+  PORT            = "8000"
+  LOG_LEVEL       = "info"
+  WEB_CONCURRENCY = "1"
+  # FORWARDED_ALLOW_IPS defaults to "*" in start.sh.
+  # On Fly.io all traffic is already proxied through their edge network, so
+  # the wildcard is safe — the real client IP is in X-Forwarded-For.
+
+# ── Metrics (optional) ────────────────────────────────────────────────────────
+# Uncomment to expose a Prometheus /metrics scrape endpoint via Fly.io.
+# [metrics]
+#   port = 9091
+#   path = "/metrics"
