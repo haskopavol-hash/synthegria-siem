@@ -1,0 +1,830 @@
+<!DOCTYPE html>
+<html lang="en" class="scroll-smooth">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Synthegria SIEM — Log Ingestion API</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: { sans: ['Inter','sans-serif'], mono: ['JetBrains Mono','monospace'] },
+          colors: {
+            cyber: {
+              50:  '#f0fffe',
+              100: '#ccfffe',
+              200: '#99fffc',
+              300: '#60fff8',
+              400: '#20f7f0',
+              500: '#00e0d9',
+              600: '#00b4b0',
+              700: '#008f8d',
+              800: '#006e6d',
+              900: '#005a59',
+            },
+            neon: { pink:'#ff2d78', violet:'#7c3aed', green:'#00ff9d' },
+          },
+          boxShadow: {
+            cyber: '0 0 20px rgba(0,224,217,.25), 0 0 60px rgba(0,224,217,.08)',
+            'cyber-lg':'0 0 40px rgba(0,224,217,.35), 0 0 100px rgba(0,224,217,.12)',
+            pink: '0 0 20px rgba(255,45,120,.30)',
+          },
+          backgroundImage: {
+            'grid-cyber': "linear-gradient(rgba(0,224,217,.04) 1px,transparent 1px),linear-gradient(90deg,rgba(0,224,217,.04) 1px,transparent 1px)",
+          },
+          backgroundSize: { grid:'40px 40px' },
+          animation: {
+            'pulse-slow':'pulse 4s cubic-bezier(0.4,0,0.6,1) infinite',
+            'float':'float 6s ease-in-out infinite',
+            'scan':'scan 3s linear infinite',
+          },
+          keyframes: {
+            float:{ '0%,100%':{transform:'translateY(0)'},'50%':{transform:'translateY(-12px)'} },
+            scan:{ '0%':{transform:'translateY(-100%)'},'100%':{transform:'translateY(400%)'} },
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body { background: #040d12; color: #e2e8f0; }
+    .gradient-text {
+      background: linear-gradient(135deg, #00e0d9 0%, #00ff9d 50%, #60fff8 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .gradient-pink {
+      background: linear-gradient(135deg, #ff2d78 0%, #7c3aed 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .card-glow {
+      background: linear-gradient(135deg, rgba(0,224,217,.06) 0%, rgba(0,0,0,0) 60%);
+      border: 1px solid rgba(0,224,217,.15);
+      transition: border-color .3s, box-shadow .3s;
+    }
+    .card-glow:hover {
+      border-color: rgba(0,224,217,.4);
+      box-shadow: 0 0 30px rgba(0,224,217,.15);
+    }
+    .btn-cyber {
+      background: linear-gradient(135deg, #00e0d9 0%, #00b4b0 100%);
+      color: #040d12;
+      font-weight: 700;
+      transition: all .25s;
+    }
+    .btn-cyber:hover {
+      box-shadow: 0 0 30px rgba(0,224,217,.5);
+      transform: translateY(-1px);
+    }
+    .btn-outline {
+      border: 1px solid rgba(0,224,217,.4);
+      color: #00e0d9;
+      transition: all .25s;
+    }
+    .btn-outline:hover {
+      background: rgba(0,224,217,.1);
+      border-color: #00e0d9;
+      box-shadow: 0 0 20px rgba(0,224,217,.2);
+    }
+    .code-block {
+      background: #0a1520;
+      border: 1px solid rgba(0,224,217,.12);
+      border-radius: .75rem;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .82rem;
+      line-height: 1.7;
+      overflow-x: auto;
+    }
+    .code-block .kw  { color: #7c3aed; }
+    .code-block .fn  { color: #00e0d9; }
+    .code-block .str { color: #00ff9d; }
+    .code-block .cm  { color: #4b6270; }
+    .code-block .num { color: #f97316; }
+    .code-block .cl  { color: #60a5fa; }
+    .code-block .op  { color: #94a3b8; }
+    .tab-btn { transition: all .2s; }
+    .tab-btn.active {
+      color: #00e0d9;
+      border-bottom: 2px solid #00e0d9;
+    }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+    .severity-critical { color: #ff2d78; }
+    .severity-high     { color: #f97316; }
+    .severity-medium   { color: #eab308; }
+    .severity-low      { color: #22c55e; }
+    .scan-line {
+      background: linear-gradient(transparent, rgba(0,224,217,.08), transparent);
+      height: 80px;
+      position: absolute;
+      left: 0; right: 0;
+      animation: scan 3s linear infinite;
+    }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #0a1520; }
+    ::-webkit-scrollbar-thumb { background: rgba(0,224,217,.3); border-radius: 3px; }
+  </style>
+</head>
+<body class="font-sans antialiased">
+
+<!-- ╔══════════════════════════════════╗ -->
+<!-- ║            NAVBAR                ║ -->
+<!-- ╚══════════════════════════════════╝ -->
+<nav class="fixed top-0 left-0 right-0 z-50 border-b border-cyber-700/20 backdrop-blur-md" style="background:rgba(4,13,18,.85)">
+  <div class="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <!-- Logo mark -->
+      <div class="w-8 h-8 rounded border border-cyber-500/50 flex items-center justify-center" style="background:rgba(0,224,217,.08)">
+        <svg viewBox="0 0 24 24" class="w-5 h-5 text-cyber-400" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+        </svg>
+      </div>
+      <span class="font-bold text-lg tracking-tight">
+        <span class="gradient-text">Synthegria</span>
+        <span class="text-slate-400 font-light ml-1 text-sm">SIEM</span>
+      </span>
+    </div>
+
+    <div class="hidden md:flex items-center gap-8 text-sm text-slate-400">
+      <a href="#features"  class="hover:text-cyber-400 transition-colors">Features</a>
+      <a href="#how-it-works" class="hover:text-cyber-400 transition-colors">How it works</a>
+      <a href="#sdks"      class="hover:text-cyber-400 transition-colors">SDKs</a>
+      <a href="#pricing"   class="hover:text-cyber-400 transition-colors">Pricing</a>
+      <a href="/docs"      class="hover:text-cyber-400 transition-colors">API Docs</a>
+    </div>
+
+    <div class="flex items-center gap-3">
+      <a href="/docs" class="btn-outline px-4 py-2 rounded-lg text-sm hidden md:block">Explore API</a>
+      <a href="#pricing" class="btn-cyber px-4 py-2 rounded-lg text-sm">Get Started</a>
+    </div>
+  </div>
+</nav>
+
+<!-- ╔══════════════════════════════════╗ -->
+<!-- ║              HERO                ║ -->
+<!-- ╚══════════════════════════════════╝ -->
+<section class="relative min-h-screen flex items-center overflow-hidden pt-20">
+  <!-- Grid background -->
+  <div class="absolute inset-0 bg-grid-cyber bg-grid opacity-100 pointer-events-none"></div>
+  <!-- Glow blobs -->
+  <div class="absolute top-1/4 left-1/4 w-96 h-96 rounded-full blur-3xl pointer-events-none" style="background:rgba(0,224,217,.06)"></div>
+  <div class="absolute bottom-1/4 right-1/4 w-80 h-80 rounded-full blur-3xl pointer-events-none" style="background:rgba(124,58,237,.06)"></div>
+
+  <div class="relative max-w-7xl mx-auto px-6 py-20 grid lg:grid-cols-2 gap-16 items-center">
+    <!-- Left: copy -->
+    <div>
+      <div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium mb-6 border border-cyber-700/40" style="background:rgba(0,224,217,.06); color:#00e0d9">
+        <span class="w-1.5 h-1.5 rounded-full bg-cyber-400 animate-pulse"></span>
+        v1.1.0 — Now with AI Security Analyst
+      </div>
+
+      <h1 class="text-5xl lg:text-6xl font-bold leading-tight tracking-tight mb-6">
+        <span class="gradient-text">Security logs</span><br/>
+        <span class="text-white">ingested at</span><br/>
+        <span class="text-white">machine speed.</span>
+      </h1>
+
+      <p class="text-lg text-slate-400 leading-relaxed mb-8 max-w-xl">
+        A production-ready log ingestion API with real-time anomaly detection,
+        GPT-4o-mini powered threat analysis, async bulk processing, and
+        Stripe metered billing — ready to deploy in minutes.
+      </p>
+
+      <div class="flex flex-wrap gap-4 mb-12">
+        <a href="#pricing" class="btn-cyber px-6 py-3 rounded-xl text-base">
+          Start ingesting →
+        </a>
+        <a href="/docs" class="btn-outline px-6 py-3 rounded-xl text-base">
+          View API docs
+        </a>
+      </div>
+
+      <!-- Stats row -->
+      <div class="grid grid-cols-3 gap-6">
+        <div>
+          <div class="text-3xl font-bold gradient-text">125</div>
+          <div class="text-xs text-slate-500 mt-1">Tests passing</div>
+        </div>
+        <div>
+          <div class="text-3xl font-bold gradient-text">4</div>
+          <div class="text-xs text-slate-500 mt-1">Threat categories</div>
+        </div>
+        <div>
+          <div class="text-3xl font-bold gradient-text">&lt;50ms</div>
+          <div class="text-xs text-slate-500 mt-1">P99 sync latency</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right: live terminal -->
+    <div class="hidden lg:block">
+      <div class="code-block p-6 relative" style="border-color:rgba(0,224,217,.25); box-shadow:0 0 60px rgba(0,224,217,.1)">
+        <!-- Terminal header -->
+        <div class="flex items-center gap-2 mb-5 pb-4 border-b border-slate-800">
+          <div class="w-3 h-3 rounded-full bg-red-500/70"></div>
+          <div class="w-3 h-3 rounded-full bg-yellow-500/70"></div>
+          <div class="w-3 h-3 rounded-full bg-green-500/70"></div>
+          <span class="ml-3 text-xs text-slate-500">synthegria — terminal</span>
+        </div>
+        <!-- Scan line overlay -->
+        <div class="scan-line pointer-events-none"></div>
+
+<pre class="text-xs leading-6"><span class="cm">$ curl -X POST https://api.synthegria.io/v1/logs \</span>
+<span class="cm">  -H "X-API-Key: synthegria_acme_abc123" \</span>
+<span class="cm">  -d '[{"message":"UNION SELECT * FROM users","source_ip":"1.2.3.4"}]'</span>
+
+<span class="op">{</span>
+  <span class="str">"status"</span><span class="op">:</span> <span class="str">"ok"</span><span class="op">,</span>
+  <span class="str">"lines_received"</span><span class="op">:</span> <span class="num">1</span><span class="op">,</span>
+  <span class="str">"meter_event_id"</span><span class="op">:</span> <span class="str">"mtr_evt_1RQx..."</span><span class="op">,</span>
+  <span class="str">"anomaly_count"</span><span class="op">:</span> <span class="num">1</span><span class="op">,</span>
+  <span class="str">"anomalies"</span><span class="op">: [{</span>
+    <span class="str">"type"</span><span class="op">:</span> <span class="str">"sql_injection"</span><span class="op">,</span>
+    <span class="str">"severity"</span><span class="op">:</span> <span class="str severity-critical">"CRITICAL"</span><span class="op">,</span>
+    <span class="str">"matched_on"</span><span class="op">:</span> <span class="str">"UNION SELECT"</span>
+  <span class="op">}],</span>
+  <span class="str">"ai_analysis"</span><span class="op">: {</span>
+    <span class="str">"mode"</span><span class="op">:</span>         <span class="str">"live"</span><span class="op">,</span>
+    <span class="str">"model"</span><span class="op">:</span>        <span class="str">"gpt-4o-mini"</span><span class="op">,</span>
+    <span class="str">"threat_level"</span><span class="op">:</span> <span class="str severity-critical">"CRITICAL"</span><span class="op">,</span>
+    <span class="str">"attack_types"</span><span class="op">:</span> [<span class="str">"sql_injection"</span>]<span class="op">,</span>
+    <span class="str">"summary"</span><span class="op">:</span>      <span class="str">"Active SQLi detected..."</span>
+  <span class="op">}</span>
+<span class="op">}</span></pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ╔══════════════════════════════════╗ -->
+<!-- ║         TRUST BADGES             ║ -->
+<!-- ╚══════════════════════════════════╝ -->
+<div class="border-y border-slate-800/60 py-6" style="background:rgba(10,21,32,.5)">
+  <div class="max-w-7xl mx-auto px-6">
+    <div class="flex flex-wrap justify-center items-center gap-8 md:gap-16 text-sm text-slate-500">
+      <span class="flex items-center gap-2">
+        <svg class="w-4 h-4 text-cyber-500" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M2.166 4.999A11.954 11.954 0 0010 1.944 11.954 11.954 0 0017.834 5c.11.65.166 1.32.166 2.001 0 5.225-3.34 9.67-8 11.317C5.34 16.67 2 12.225 2 7c0-.682.057-1.35.166-2.001zm11.541 3.708a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/></svg>
+        RFC 7235 Auth
+      </span>
+      <span class="flex items-center gap-2">
+        <svg class="w-4 h-4 text-cyber-500" fill="currentColor" viewBox="0 0 20 20"><path d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+        125 Tests Passing
+      </span>
+      <span class="flex items-center gap-2">
+        <svg class="w-4 h-4 text-cyber-500" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clip-rule="evenodd"/></svg>
+        Async Bulk Processing
+      </span>
+      <span class="flex items-center gap-2">
+        <svg class="w-4 h-4 text-cyber-500" fill="currentColor" viewBox="0 0 20 20"><path d="M3 4a1 1 0 011-1h12a1 1 0 011 1v2a1 1 0 01-1 1H4a1 1 0 01-1-1V4zM3 10a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H4a1 1 0 01-1-1v-6zM14 9a1 1 0 00-1 1v6a1 1 0 001 1h2a1 1 0 001-1v-6a1 1 0 00-1-1h-2z"/></svg>
+        Stripe Metered Billing
+      </span>
+      <span class="flex items-center gap-2">
+        <svg class="w-4 h-4 text-cyber-500" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M12.316 3.051a1 1 0 01.633 1.265l-4 12a1 1 0 11-1.898-.632l4-12a1 1 0 011.265-.633zM5.707 6.293a1 1 0 010 1.414L3.414 10l2.293 2.293a1 1 0 11-1.414 1.414l-3-3a1 1 0 010-1.414l3-3a1 1 0 011.414 0zm8.586 0a1 1 0 011.414 0l3 3a1 1 0 010 1.414l-3 3a1 1 0 11-1.414-1.414L16.586 10l-2.293-2.293a1 1 0 010-1.414z" clip-rule="evenodd"/></svg>
+        Python &amp; JS SDKs
+      </span>
+      <span class="flex items-center gap-2">
+        <svg class="w-4 h-4 text-cyber-500" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/></svg>
+        GPT-4o-mini AI Analyst
+      </span>
+    </div>
+  </div>
+</div>
+
+<!-- ╔══════════════════════════════════╗ -->
+<!-- ║            FEATURES              ║ -->
+<!-- ╚══════════════════════════════════╝ -->
+<section id="features" class="py-24 max-w-7xl mx-auto px-6">
+  <div class="text-center mb-16">
+    <h2 class="text-4xl font-bold mb-4">
+      Everything a SIEM pipeline needs
+    </h2>
+    <p class="text-slate-400 text-lg max-w-2xl mx-auto">
+      Built on FastAPI with production-grade security, async processing,
+      and AI threat intelligence — ready to receive logs from any stack.
+    </p>
+  </div>
+
+  <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+    <!-- Feature cards -->
+    <div class="card-glow rounded-2xl p-6">
+      <div class="w-10 h-10 rounded-xl mb-5 flex items-center justify-center" style="background:rgba(0,224,217,.1)">
+        <svg class="w-5 h-5 text-cyber-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+      </div>
+      <h3 class="text-lg font-semibold mb-2 text-white">Real-time Ingestion</h3>
+      <p class="text-slate-400 text-sm leading-relaxed">
+        <code class="text-cyber-400 text-xs">POST /v1/logs</code> accepts JSON batches
+        and returns a complete anomaly + AI analysis envelope in a single round-trip.
+        P99 under 50ms for typical batches.
+      </p>
+    </div>
+
+    <div class="card-glow rounded-2xl p-6">
+      <div class="w-10 h-10 rounded-xl mb-5 flex items-center justify-center" style="background:rgba(0,224,217,.1)">
+        <svg class="w-5 h-5 text-cyber-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 4-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4"/></svg>
+      </div>
+      <h3 class="text-lg font-semibold mb-2 text-white">Async Bulk Pipeline</h3>
+      <p class="text-slate-400 text-sm leading-relaxed">
+        <code class="text-cyber-400 text-xs">POST /v1/logs/bulk</code> accepts gzip-compressed
+        batches up to 10 MB and returns <code class="text-cyber-400 text-xs">202 Accepted</code> immediately.
+        Poll <code class="text-cyber-400 text-xs">/v1/jobs/{id}</code> for results.
+      </p>
+    </div>
+
+    <div class="card-glow rounded-2xl p-6">
+      <div class="w-10 h-10 rounded-xl mb-5 flex items-center justify-center" style="background:rgba(255,45,120,.1)">
+        <svg class="w-5 h-5" style="color:#ff2d78" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+      </div>
+      <h3 class="text-lg font-semibold mb-2 text-white">4-Category Anomaly Engine</h3>
+      <p class="text-slate-400 text-sm leading-relaxed">
+        Rules-based scanner inspects every string field across each log line.
+        Detects <span class="severity-critical font-medium">SQL injection</span>,
+        <span class="severity-high font-medium">XSS</span>,
+        <span class="severity-high font-medium">brute force</span>, and
+        <span class="severity-medium font-medium">auth anomalies</span> in milliseconds.
+      </p>
+    </div>
+
+    <div class="card-glow rounded-2xl p-6">
+      <div class="w-10 h-10 rounded-xl mb-5 flex items-center justify-center" style="background:rgba(124,58,237,.1)">
+        <svg class="w-5 h-5" style="color:#7c3aed" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17H3a2 2 0 01-2-2V5a2 2 0 012-2h14a2 2 0 012 2v10a2 2 0 01-2 2h-2M12 3v1"/></svg>
+      </div>
+      <h3 class="text-lg font-semibold mb-2 text-white">AI Security Analyst</h3>
+      <p class="text-slate-400 text-sm leading-relaxed">
+        GPT-4o-mini generates threat summaries for CRITICAL/HIGH anomalies.
+        Falls back to a deterministic mock engine when no OpenAI key is set —
+        same JSON schema, always.
+      </p>
+    </div>
+
+    <div class="card-glow rounded-2xl p-6">
+      <div class="w-10 h-10 rounded-xl mb-5 flex items-center justify-center" style="background:rgba(0,224,217,.1)">
+        <svg class="w-5 h-5 text-cyber-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+      </div>
+      <h3 class="text-lg font-semibold mb-2 text-white">Enterprise Security</h3>
+      <p class="text-slate-400 text-sm leading-relaxed">
+        RFC 7235 authentication, per-key rate limiting (60 req/min),
+        structured audit logging on every request, and body-size caps.
+        Error responses never echo raw API keys.
+      </p>
+    </div>
+
+    <div class="card-glow rounded-2xl p-6">
+      <div class="w-10 h-10 rounded-xl mb-5 flex items-center justify-center" style="background:rgba(99,102,241,.1)">
+        <svg class="w-5 h-5" style="color:#6366f1" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z"/></svg>
+      </div>
+      <h3 class="text-lg font-semibold mb-2 text-white">Stripe Metered Billing</h3>
+      <p class="text-slate-400 text-sm leading-relaxed">
+        Every ingested line fires a Stripe Billing Meter event automatically.
+        Usage-based pricing — you only pay for what you actually process,
+        with per-tenant Customer ID isolation.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ╔══════════════════════════════════╗ -->
+<!-- ║         HOW IT WORKS             ║ -->
+<!-- ╚══════════════════════════════════╝ -->
+<section id="how-it-works" class="py-24 border-t border-slate-800/50" style="background:rgba(10,21,32,.4)">
+  <div class="max-w-7xl mx-auto px-6">
+    <div class="text-center mb-16">
+      <h2 class="text-4xl font-bold mb-4">How it works</h2>
+      <p class="text-slate-400 text-lg max-w-xl mx-auto">
+        Two ingestion paths — synchronous for real-time, async for bulk throughput.
+      </p>
+    </div>
+
+    <!-- Async bulk flow diagram -->
+    <div class="grid lg:grid-cols-5 gap-0 items-center mb-16">
+      <div class="card-glow rounded-2xl p-5 text-center">
+        <div class="text-2xl mb-2">📦</div>
+        <div class="text-sm font-semibold text-white">Your Server</div>
+        <div class="text-xs text-slate-500 mt-1">gzip batch</div>
+      </div>
+      <div class="hidden lg:flex items-center justify-center flex-col gap-1 px-2">
+        <div class="text-cyber-500 text-xs font-mono">POST /v1/logs/bulk</div>
+        <div class="w-full h-px bg-cyber-700/40"></div>
+        <div class="text-slate-600 text-xs">10 MB cap · 415 if no gzip</div>
+      </div>
+      <div class="card-glow rounded-2xl p-5 text-center" style="border-color:rgba(0,224,217,.3)">
+        <div class="text-2xl mb-2">⚡</div>
+        <div class="text-sm font-semibold text-white">202 Accepted</div>
+        <div class="text-xs text-slate-500 mt-1">job_id + poll_url</div>
+      </div>
+      <div class="hidden lg:flex items-center justify-center flex-col gap-1 px-2">
+        <div class="text-cyber-500 text-xs font-mono">asyncio.Queue</div>
+        <div class="w-full h-px bg-cyber-700/40"></div>
+        <div class="text-slate-600 text-xs">worker drains</div>
+      </div>
+      <div class="card-glow rounded-2xl p-5 text-center">
+        <div class="text-2xl mb-2">🔍</div>
+        <div class="text-sm font-semibold text-white">Done</div>
+        <div class="text-xs text-slate-500 mt-1">anomalies + AI + meter</div>
+      </div>
+    </div>
+
+    <!-- Threat detection table -->
+    <div class="grid lg:grid-cols-2 gap-8">
+      <div>
+        <h3 class="text-xl font-semibold mb-5 text-white">Anomaly categories</h3>
+        <div class="space-y-3">
+          <div class="card-glow rounded-xl p-4 flex items-center justify-between">
+            <div>
+              <div class="font-medium text-sm text-white">SQL Injection</div>
+              <div class="text-xs text-slate-500 mt-0.5">UNION SELECT · DROP TABLE · hex payloads</div>
+            </div>
+            <span class="px-2.5 py-1 rounded-md text-xs font-bold severity-critical" style="background:rgba(255,45,120,.1)">CRITICAL</span>
+          </div>
+          <div class="card-glow rounded-xl p-4 flex items-center justify-between">
+            <div>
+              <div class="font-medium text-sm text-white">Brute Force</div>
+              <div class="text-xs text-slate-500 mt-0.5">Failed password · account locked · 401/403</div>
+            </div>
+            <span class="px-2.5 py-1 rounded-md text-xs font-bold severity-high" style="background:rgba(249,115,22,.1)">HIGH</span>
+          </div>
+          <div class="card-glow rounded-xl p-4 flex items-center justify-between">
+            <div>
+              <div class="font-medium text-sm text-white">Cross-Site Scripting</div>
+              <div class="text-xs text-slate-500 mt-0.5">&lt;script&gt; · javascript: · document.cookie</div>
+            </div>
+            <span class="px-2.5 py-1 rounded-md text-xs font-bold severity-high" style="background:rgba(249,115,22,.1)">HIGH</span>
+          </div>
+          <div class="card-glow rounded-xl p-4 flex items-center justify-between">
+            <div>
+              <div class="font-medium text-sm text-white">Auth Anomaly</div>
+              <div class="text-xs text-slate-500 mt-0.5">Privilege escalation · sudo · JWT issues</div>
+            </div>
+            <span class="px-2.5 py-1 rounded-md text-xs font-bold severity-medium" style="background:rgba(234,179,8,.1)">MEDIUM</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- AI analyst showcase -->
+      <div>
+        <h3 class="text-xl font-semibold mb-5 text-white">AI threat summary</h3>
+        <div class="code-block p-5" style="border-color:rgba(124,58,237,.3)">
+          <div class="flex items-center gap-2 mb-4 pb-3 border-b border-slate-800">
+            <div class="w-2 h-2 rounded-full bg-neon-violet animate-pulse"></div>
+            <span class="text-xs text-slate-500">gpt-4o-mini analysis</span>
+          </div>
+<pre class="text-xs leading-7"><span class="op">{</span>
+  <span class="str">"mode"</span><span class="op">:</span>          <span class="str">"live"</span><span class="op">,</span>
+  <span class="str">"model"</span><span class="op">:</span>         <span class="str">"gpt-4o-mini"</span><span class="op">,</span>
+  <span class="str">"threat_level"</span><span class="op">:</span>  <span class="str severity-critical">"CRITICAL"</span><span class="op">,</span>
+  <span class="str">"attack_types"</span><span class="op">:</span>  [<span class="str">"sql_injection"</span>]<span class="op">,</span>
+  <span class="str">"summary"</span><span class="op">:</span>       <span class="str">"Active SQL injection
+  campaign targeting auth
+  endpoints. Immediate
+  WAF rule recommended."</span><span class="op">,</span>
+  <span class="str">"tokens_used"</span><span class="op">:</span>   <span class="num">183</span>
+<span class="op">}</span></pre>
+        </div>
+        <p class="text-xs text-slate-600 mt-3">
+          No OpenAI key? The mock analyst produces the same JSON schema with deterministic templates.
+          Your integration code works identically in both environments.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ╔══════════════════════════════════╗ -->
+<!-- ║            SDK TABS              ║ -->
+<!-- ╚══════════════════════════════════╝ -->
+<section id="sdks" class="py-24 max-w-7xl mx-auto px-6">
+  <div class="text-center mb-14">
+    <h2 class="text-4xl font-bold mb-4">Client SDKs</h2>
+    <p class="text-slate-400 text-lg max-w-xl mx-auto">
+      Zero-dependency libraries for Python and JavaScript — covers sync, async bulk,
+      job polling, and typed error handling out of the box.
+    </p>
+  </div>
+
+  <!-- Tab bar -->
+  <div class="flex gap-0 border-b border-slate-800 mb-8">
+    <button onclick="switchTab('python')" id="tab-python" class="tab-btn active px-6 py-3 text-sm font-medium text-slate-400 border-b-2 border-transparent">
+      🐍 Python
+    </button>
+    <button onclick="switchTab('javascript')" id="tab-javascript" class="tab-btn px-6 py-3 text-sm font-medium text-slate-400 border-b-2 border-transparent">
+      🟨 JavaScript / Node.js
+    </button>
+    <button onclick="switchTab('curl')" id="tab-curl" class="tab-btn px-6 py-3 text-sm font-medium text-slate-400 border-b-2 border-transparent">
+      🌀 curl
+    </button>
+  </div>
+
+  <!-- Python -->
+  <div id="content-python" class="tab-content active">
+    <div class="grid lg:grid-cols-2 gap-6">
+      <div>
+        <div class="text-xs text-slate-500 mb-2 font-mono">Synchronous ingestion</div>
+        <div class="code-block p-5">
+<pre class="text-xs leading-6"><span class="kw">from</span> <span class="cl">synthegria</span> <span class="kw">import</span> <span class="cl">SynthegriaClient</span>
+
+client <span class="op">=</span> <span class="fn">SynthegriaClient</span>(
+    api_key<span class="op">=</span><span class="str">"synthegria_acme_abc123"</span><span class="op">,</span>
+    base_url<span class="op">=</span><span class="str">"https://api.synthegria.io"</span><span class="op">,</span>
+)
+
+result <span class="op">=</span> client<span class="op">.</span><span class="fn">ingest</span>([{
+    <span class="str">"message"</span><span class="op">:</span> <span class="str">"Failed password for root"</span><span class="op">,</span>
+    <span class="str">"source_ip"</span><span class="op">:</span> <span class="str">"203.0.113.5"</span><span class="op">,</span>
+}])
+
+<span class="fn">print</span>(result[<span class="str">"anomaly_count"</span>])       <span class="cm"># 1</span>
+<span class="fn">print</span>(result[<span class="str">"ai_analysis"</span>][<span class="str">"summary"</span>])</pre>
+        </div>
+      </div>
+      <div>
+        <div class="text-xs text-slate-500 mb-2 font-mono">Async bulk + error handling</div>
+        <div class="code-block p-5">
+<pre class="text-xs leading-6"><span class="kw">from</span> <span class="cl">synthegria</span> <span class="kw">import</span> <span class="cl">AuthError</span><span class="op">,</span> <span class="cl">RateLimitError</span>
+
+<span class="cm"># Queue 10 000 events, return immediately</span>
+job <span class="op">=</span> client<span class="op">.</span><span class="fn">ingest_bulk</span>(large_batch)
+<span class="fn">print</span>(job<span class="op">.</span>job_id)
+
+<span class="kw">try</span><span class="op">:</span>
+    result <span class="op">=</span> job<span class="op">.</span><span class="fn">wait</span>(timeout<span class="op">=</span><span class="num">60</span>)
+    <span class="fn">print</span>(result[<span class="str">"compression_ratio"</span>])  <span class="cm"># "4.3x"</span>
+<span class="kw">except</span> <span class="cl">AuthError</span><span class="op">:</span>
+    <span class="fn">print</span>(<span class="str">"Check your API key"</span>)
+<span class="kw">except</span> <span class="cl">RateLimitError</span> <span class="kw">as</span> e<span class="op">:</span>
+    <span class="fn">print</span>(<span class="str">f"Retry after </span><span class="op">{</span>e<span class="op">.</span>retry_after<span class="op">}</span><span class="str">s"</span>)</pre>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- JavaScript -->
+  <div id="content-javascript" class="tab-content">
+    <div class="grid lg:grid-cols-2 gap-6">
+      <div>
+        <div class="text-xs text-slate-500 mb-2 font-mono">Synchronous ingestion (async/await)</div>
+        <div class="code-block p-5">
+<pre class="text-xs leading-6"><span class="kw">const</span> <span class="op">{</span> <span class="cl">SynthegriaClient</span> <span class="op">}</span> <span class="op">=</span>
+  <span class="fn">require</span>(<span class="str">"@synthegria/client"</span>)<span class="op">;</span>
+
+<span class="kw">const</span> client <span class="op">=</span> <span class="kw">new</span> <span class="cl">SynthegriaClient</span>(<span class="op">{</span>
+  apiKey<span class="op">:</span>  <span class="str">"synthegria_acme_abc123"</span><span class="op">,</span>
+  baseUrl<span class="op">:</span> <span class="str">"https://api.synthegria.io"</span><span class="op">,</span>
+<span class="op">}</span>)<span class="op">;</span>
+
+<span class="kw">const</span> result <span class="op">=</span> <span class="kw">await</span> client<span class="op">.</span><span class="fn">ingest</span>(logs)<span class="op">;</span>
+console<span class="op">.</span><span class="fn">log</span>(result<span class="op">.</span>anomaly_count)<span class="op">;</span>
+console<span class="op">.</span><span class="fn">log</span>(result<span class="op">.</span>ai_analysis<span class="op">?.</span>summary)<span class="op">;</span></pre>
+        </div>
+      </div>
+      <div>
+        <div class="text-xs text-slate-500 mb-2 font-mono">Bulk ingestion + TypeScript types</div>
+        <div class="code-block p-5">
+<pre class="text-xs leading-6"><span class="kw">import</span> <span class="op">{</span> <span class="cl">SynthegriaClient</span><span class="op">,</span> <span class="cl">IngestResult</span> <span class="op">}</span>
+  <span class="kw">from</span> <span class="str">"@synthegria/client"</span><span class="op">;</span>
+
+<span class="kw">const</span> job <span class="op">=</span> <span class="kw">await</span> client<span class="op">.</span><span class="fn">ingestBulk</span>(largeBatch)<span class="op">;</span>
+console<span class="op">.</span><span class="fn">log</span>(job<span class="op">.</span>jobId)<span class="op">;</span>  <span class="cm">// UUID</span>
+
+<span class="kw">const</span> done<span class="op">:</span> <span class="cl">IngestResult</span> <span class="op">=</span>
+  <span class="kw">await</span> job<span class="op">.</span><span class="fn">wait</span>(<span class="op">{</span> timeout<span class="op">:</span> <span class="num">60_000</span> <span class="op">}</span>)<span class="op">;</span>
+
+console<span class="op">.</span><span class="fn">log</span>(done<span class="op">.</span>anomaly_count)<span class="op">;</span>
+console<span class="op">.</span><span class="fn">log</span>(done<span class="op">.</span>ai_analysis<span class="op">?.</span>threat_level)<span class="op">;</span></pre>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- curl -->
+  <div id="content-curl" class="tab-content">
+    <div class="grid lg:grid-cols-2 gap-6">
+      <div>
+        <div class="text-xs text-slate-500 mb-2 font-mono">Real-time ingestion</div>
+        <div class="code-block p-5">
+<pre class="text-xs leading-6"><span class="fn">curl</span> <span class="op">-X</span> POST https://api.synthegria.io/v1/logs \
+  <span class="op">-H</span> <span class="str">"X-API-Key: synthegria_acme_abc123"</span> \
+  <span class="op">-H</span> <span class="str">"Content-Type: application/json"</span> \
+  <span class="op">-d</span> <span class="str">'[{
+    "timestamp":  "2026-05-30T12:00:00Z",
+    "source_ip":  "203.0.113.5",
+    "message":    "UNION SELECT * FROM users",
+    "severity":   "CRITICAL"
+  }]'</span></pre>
+        </div>
+      </div>
+      <div>
+        <div class="text-xs text-slate-500 mb-2 font-mono">Bulk ingestion (gzip)</div>
+        <div class="code-block p-5">
+<pre class="text-xs leading-6"><span class="cm"># Compress and send</span>
+<span class="fn">echo</span> <span class="str">'[{"message":"event 1"},{"message":"event 2"}]'</span> \
+  | <span class="fn">gzip</span> \
+  | <span class="fn">curl</span> <span class="op">-X</span> POST https://api.synthegria.io/v1/logs/bulk \
+      <span class="op">-H</span> <span class="str">"X-API-Key: synthegria_acme_abc123"</span> \
+      <span class="op">-H</span> <span class="str">"Content-Encoding: gzip"</span> \
+      <span class="op">-H</span> <span class="str">"Content-Type: application/json"</span> \
+      <span class="op">--data-binary</span> @-
+
+<span class="cm"># Poll for results</span>
+<span class="fn">curl</span> https://api.synthegria.io/v1/jobs/&lt;job_id&gt;</pre>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ╔══════════════════════════════════╗ -->
+<!-- ║            PRICING               ║ -->
+<!-- ╚══════════════════════════════════╝ -->
+<section id="pricing" class="py-24 border-t border-slate-800/50" style="background:rgba(10,21,32,.4)">
+  <div class="max-w-7xl mx-auto px-6">
+    <div class="text-center mb-16">
+      <h2 class="text-4xl font-bold mb-4">Simple, usage-based pricing</h2>
+      <p class="text-slate-400 text-lg max-w-xl mx-auto">
+        Pay only for what you ingest. No seat licences, no platform fees, no surprises.
+        Powered by Stripe Metered Billing.
+      </p>
+    </div>
+
+    <div class="grid md:grid-cols-3 gap-8 max-w-5xl mx-auto">
+      <!-- Starter -->
+      <div class="card-glow rounded-2xl p-8 flex flex-col">
+        <div class="mb-6">
+          <div class="text-sm font-medium text-slate-400 mb-1">Starter</div>
+          <div class="flex items-end gap-1 mb-2">
+            <span class="text-4xl font-bold text-white">$0</span>
+            <span class="text-slate-500 mb-1">/mo</span>
+          </div>
+          <div class="text-sm text-slate-500">Up to 100 000 log lines/month</div>
+        </div>
+        <ul class="space-y-3 text-sm text-slate-400 mb-8 flex-1">
+          <li class="flex items-center gap-2"><span class="text-cyber-500">✓</span> Real-time JSON ingestion</li>
+          <li class="flex items-center gap-2"><span class="text-cyber-500">✓</span> 4-category anomaly engine</li>
+          <li class="flex items-center gap-2"><span class="text-cyber-500">✓</span> Mock AI analyst</li>
+          <li class="flex items-center gap-2"><span class="text-cyber-500">✓</span> Audit log (20 entries)</li>
+          <li class="flex items-center gap-2"><span class="text-slate-600">✗</span> Bulk async ingestion</li>
+          <li class="flex items-center gap-2"><span class="text-slate-600">✗</span> Live GPT-4o-mini analysis</li>
+        </ul>
+        <a href="mailto:platform@synthegria.io?subject=Starter%20plan" class="btn-outline w-full py-3 rounded-xl text-center text-sm block">
+          Get API key
+        </a>
+      </div>
+
+      <!-- Pro — highlighted -->
+      <div class="rounded-2xl p-8 flex flex-col relative overflow-hidden" style="background:linear-gradient(135deg,rgba(0,224,217,.08) 0%,rgba(0,0,0,0) 60%); border:1px solid rgba(0,224,217,.4); box-shadow:0 0 50px rgba(0,224,217,.12)">
+        <div class="absolute top-4 right-4 px-3 py-1 rounded-full text-xs font-bold text-cyber-900 bg-cyber-400">
+          Most popular
+        </div>
+        <div class="mb-6">
+          <div class="text-sm font-medium text-cyber-400 mb-1">Pro</div>
+          <div class="flex items-end gap-1 mb-2">
+            <span class="text-4xl font-bold text-white">$0.40</span>
+            <span class="text-slate-400 mb-1">/ 1M lines</span>
+          </div>
+          <div class="text-sm text-slate-400">Volume discounts from 10M lines</div>
+        </div>
+        <ul class="space-y-3 text-sm text-slate-300 mb-8 flex-1">
+          <li class="flex items-center gap-2"><span class="text-cyber-400">✓</span> Everything in Starter</li>
+          <li class="flex items-center gap-2"><span class="text-cyber-400">✓</span> Async bulk ingestion (gzip)</li>
+          <li class="flex items-center gap-2"><span class="text-cyber-400">✓</span> Live GPT-4o-mini AI analyst</li>
+          <li class="flex items-center gap-2"><span class="text-cyber-400">✓</span> 500-job queue capacity</li>
+          <li class="flex items-center gap-2"><span class="text-cyber-400">✓</span> Full audit log (100 entries)</li>
+          <li class="flex items-center gap-2"><span class="text-cyber-400">✓</span> Priority support</li>
+        </ul>
+        <a href="mailto:platform@synthegria.io?subject=Pro%20plan" class="btn-cyber w-full py-3 rounded-xl text-center text-sm block">
+          Start ingesting →
+        </a>
+      </div>
+
+      <!-- Enterprise -->
+      <div class="card-glow rounded-2xl p-8 flex flex-col">
+        <div class="mb-6">
+          <div class="text-sm font-medium text-slate-400 mb-1">Enterprise</div>
+          <div class="flex items-end gap-1 mb-2">
+            <span class="text-4xl font-bold text-white">Custom</span>
+          </div>
+          <div class="text-sm text-slate-500">Negotiated per-line rate</div>
+        </div>
+        <ul class="space-y-3 text-sm text-slate-400 mb-8 flex-1">
+          <li class="flex items-center gap-2"><span class="text-cyber-500">✓</span> Everything in Pro</li>
+          <li class="flex items-center gap-2"><span class="text-cyber-500">✓</span> Dedicated worker pool</li>
+          <li class="flex items-center gap-2"><span class="text-cyber-500">✓</span> Custom anomaly rules</li>
+          <li class="flex items-center gap-2"><span class="text-cyber-500">✓</span> Redis-backed rate limits</li>
+          <li class="flex items-center gap-2"><span class="text-cyber-500">✓</span> SLA &amp; 24/7 support</li>
+          <li class="flex items-center gap-2"><span class="text-cyber-500">✓</span> Private deployment option</li>
+        </ul>
+        <a href="mailto:platform@synthegria.io?subject=Enterprise%20inquiry" class="btn-outline w-full py-3 rounded-xl text-center text-sm block">
+          Talk to us
+        </a>
+      </div>
+    </div>
+
+    <!-- Stripe badge -->
+    <div class="text-center mt-10">
+      <p class="text-sm text-slate-600 flex items-center justify-center gap-2">
+        <svg class="w-4 h-4" style="color:#6772e5" fill="currentColor" viewBox="0 0 24 24"><path d="M13.976 9.15c-2.172-.806-3.356-1.426-3.356-2.409 0-.831.683-1.305 1.901-1.305 2.227 0 4.515.858 6.09 1.631l.89-5.494C18.252.975 15.697 0 12.165 0 9.667 0 7.589.654 6.104 1.872 4.56 3.147 3.757 4.992 3.757 7.218c0 4.039 2.467 5.76 6.476 7.219 2.585.92 3.445 1.574 3.445 2.583 0 .98-.84 1.545-2.354 1.545-1.875 0-4.965-.921-6.99-2.109l-.9 5.555C5.175 22.99 8.385 24 11.714 24c2.641 0 4.843-.624 6.328-1.813 1.664-1.305 2.525-3.236 2.525-5.732 0-4.128-2.524-5.851-6.591-7.305z"/></svg>
+        Billing powered by Stripe Metered Billing · Price ID:
+        <code class="text-xs text-slate-500 font-mono">price_1TZyx6Rvq8CwKfXtw04VZgey</code>
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ╔══════════════════════════════════╗ -->
+<!-- ║              CTA                 ║ -->
+<!-- ╚══════════════════════════════════╝ -->
+<section class="py-24 relative overflow-hidden">
+  <div class="absolute inset-0 bg-grid-cyber bg-grid opacity-50 pointer-events-none"></div>
+  <div class="absolute inset-0 flex items-center justify-center pointer-events-none">
+    <div class="w-[600px] h-[300px] rounded-full blur-3xl" style="background:radial-gradient(ellipse,rgba(0,224,217,.08) 0%,transparent 70%)"></div>
+  </div>
+  <div class="relative max-w-3xl mx-auto px-6 text-center">
+    <h2 class="text-4xl lg:text-5xl font-bold mb-6 leading-tight">
+      Ready to secure your<br/>
+      <span class="gradient-text">log pipeline?</span>
+    </h2>
+    <p class="text-slate-400 text-lg mb-10 max-w-xl mx-auto">
+      Start ingesting in under 5 minutes. No infrastructure to manage —
+      just send logs and get anomaly intelligence back.
+    </p>
+    <div class="flex flex-col sm:flex-row justify-center gap-4">
+      <a href="mailto:platform@synthegria.io?subject=API%20key%20request" class="btn-cyber px-8 py-4 rounded-xl text-base">
+        Get your API key →
+      </a>
+      <a href="/docs" class="btn-outline px-8 py-4 rounded-xl text-base">
+        Read the docs
+      </a>
+    </div>
+    <div class="mt-8 flex items-center justify-center gap-6 text-xs text-slate-600">
+      <span>✓ Free tier available</span>
+      <span>✓ No credit card to start</span>
+      <span>✓ Deploy on Render in 2 min</span>
+    </div>
+  </div>
+</section>
+
+<!-- ╔══════════════════════════════════╗ -->
+<!-- ║             FOOTER               ║ -->
+<!-- ╚══════════════════════════════════╝ -->
+<footer class="border-t border-slate-800/60 py-12" style="background:rgba(4,13,18,.9)">
+  <div class="max-w-7xl mx-auto px-6">
+    <div class="grid md:grid-cols-4 gap-8 mb-8">
+      <div class="md:col-span-2">
+        <div class="flex items-center gap-3 mb-4">
+          <div class="w-8 h-8 rounded border border-cyber-500/50 flex items-center justify-center" style="background:rgba(0,224,217,.08)">
+            <svg viewBox="0 0 24 24" class="w-5 h-5 text-cyber-400" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+            </svg>
+          </div>
+          <span class="font-bold text-white">Synthegria SIEM</span>
+        </div>
+        <p class="text-sm text-slate-500 max-w-xs leading-relaxed">
+          Log ingestion backbone for autonomous security systems.
+          Built on FastAPI · Secured by Stripe · Powered by GPT-4o-mini.
+        </p>
+      </div>
+      <div>
+        <h4 class="text-sm font-semibold text-white mb-3">Product</h4>
+        <ul class="space-y-2 text-sm text-slate-500">
+          <li><a href="#features" class="hover:text-cyber-400 transition-colors">Features</a></li>
+          <li><a href="#pricing" class="hover:text-cyber-400 transition-colors">Pricing</a></li>
+          <li><a href="/docs" class="hover:text-cyber-400 transition-colors">API Reference</a></li>
+          <li><a href="/healthz" class="hover:text-cyber-400 transition-colors">Status</a></li>
+        </ul>
+      </div>
+      <div>
+        <h4 class="text-sm font-semibold text-white mb-3">Developers</h4>
+        <ul class="space-y-2 text-sm text-slate-500">
+          <li><a href="https://github.com/haskopavol-hash/synthegria-siem" class="hover:text-cyber-400 transition-colors">GitHub</a></li>
+          <li><a href="https://github.com/haskopavol-hash/synthegria-siem/blob/main/README.md" class="hover:text-cyber-400 transition-colors">Documentation</a></li>
+          <li><a href="mailto:platform@synthegria.io" class="hover:text-cyber-400 transition-colors">Support</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="border-t border-slate-800/60 pt-6 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-slate-600">
+      <span>© 2026 Synthegria SIEM. All rights reserved.</span>
+      <span class="flex items-center gap-2">
+        Built with <span class="text-red-500">♥</span> using FastAPI &amp; Tailwind CSS
+      </span>
+    </div>
+  </div>
+</footer>
+
+<!-- Tab switching script -->
+<script>
+function switchTab(name) {
+  ['python','javascript','curl'].forEach(function(t) {
+    document.getElementById('tab-' + t).classList.remove('active');
+    document.getElementById('tab-' + t).style.color = '';
+    document.getElementById('content-' + t).classList.remove('active');
+  });
+  document.getElementById('tab-' + name).classList.add('active');
+  document.getElementById('content-' + name).classList.add('active');
+}
+</script>
+</body>
+</html>

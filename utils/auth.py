@@ -44,5 +44,5 @@ def resolve_customer(api_key: str | None) -> str:
         raise AuthError("Missing API key — include X-API-Key in your request headers.")
     customer_id = API_KEY_MAP.get(api_key)
     if not customer_id:
-        raise AuthError(f"Unknown API key: '{api_key}'")
+        raise AuthError("Unknown or invalid API key.")
     return customer_id
